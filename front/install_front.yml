@@ -1,0 +1,152 @@
+- name: Installer le front Open-nebula
+  hosts: front
+  become: yes
+  gather_facts: yes
+
+  vars:
+    mysql_rpm_url: " https://repo.mysql.com//mysql80-community-release-el9-5.noarch.rpm"
+    hosts_entries:
+      - { name: frontend.one, ip: 192.168.1.10 }
+      - { name: kvm1.one, ip: 192.168.1.11 }
+      - { name: kvm2.one, ip: 192.168.1.12 }
+    root_password: "-Mdp_Astra123-"
+    oneadmin_password: "-MotDePasse_Astra123-"
+    ansible_user: toto
+    ansible_password: toto
+    ansible_become: true
+    ansible_become_method: sudo
+    ansible_become_password: toto
+    ansible_python_interpreter: /usr/bin/python3
+
+
+  tasks:
+
+    - name: Vérifier que le système est Rocky Linux
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] == "RedHat"
+        fail_msg: "Ce playbook est conçu pour Rocky / RHEL / CentOS"
+
+    
+
+    - name: Passer SELinux en permissive (runtime et config)
+      ansible.posix.selinux:
+        policy: targeted
+        state: permissive
+
+    - name: Afficher l'état actuel de SELinux
+      ansible.builtin.debug:
+        msg: "SELinux est maintenant {{ ansible_selinux.status }}"
+
+    - name: Mettre à jour /etc/hosts pour toutes les machines
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        line: "{{ item.ip }} {{ item.name }}"
+        state: present
+        create: yes
+      loop: "{{ hosts_entries }}"
+      # éviter de dupliquer l'entrée si elle existe
+
+    - name: Installer PyMySQL (dépendance Ansible MySQL)
+      ansible.builtin.dnf:
+        name: python3-PyMySQL
+        state: present
+
+
+    - name: Télécharger le RPM du dépôt MySQL
+      ansible.builtin.get_url:
+        url: "{{ mysql_rpm_url }}"
+        dest: "/tmp/mysql80-community-release-el9-5.noarch.rpm"
+        mode: '0644'
+
+    - name: Importer la clé GPG MySQL
+      ansible.builtin.rpm_key:
+        state: present
+        key: https://repo.mysql.com/RPM-GPG-KEY-mysql-2022
+
+
+    - name: Installer le dépôt MySQL localement
+      become: true
+      ansible.builtin.dnf:
+        name: /tmp/mysql80-community-release-el9-5.noarch.rpm
+        state: present
+
+
+    - name: Installer le serveur MySQL
+      ansible.builtin.dnf:
+        name: mysql-community-server
+        state: present
+
+    - name: S'assurer que MySQL démarre et est activé
+      ansible.builtin.service:
+        name: mysqld
+        state: started
+        enabled: yes
+
+    - name: Extraire le mot de passe temporaire root
+      ansible.builtin.shell: "grep 'temporary password' /var/log/mysqld.log | awk '{print $NF}'"
+      register: temp_root_pass
+      changed_when: false
+
+    - name: Vérifier si le mot de passe root est expiré
+      ansible.builtin.shell: |
+        mysql -u root -p'{{ temp_root_pass.stdout }}' -e "SELECT 1;"
+      register: root_login_test
+      failed_when: false
+      changed_when: false
+
+
+    - name: Changer le mot de passe root MySQL (première connexion)
+      ansible.builtin.shell: |
+        mysql --connect-expired-password \
+              -u root \
+              -p'{{ temp_root_pass.stdout }}' \
+              -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ root_password }}';"
+      no_log: true
+
+
+
+    - name: Configurer le mot de passe root MySQL (Ansible)
+      ansible.builtin.mysql_user:
+        login_user: root
+        login_password: "{{ root_password }}"
+        user: root
+        host: localhost
+        password: "{{ root_password }}"
+        check_implicit_admin: yes
+        state: present
+      no_log: true
+
+    - name: Créer la base de données OpenNebula
+      ansible.builtin.mysql_db:
+        name: opennebula
+        state: present
+        login_user: root
+        login_password: "{{ root_password }}"
+
+    - name: Créer l'utilisateur MySQL oneadmin
+      ansible.builtin.mysql_user:
+        name: oneadmin
+        password: "{{ oneadmin_password }}"
+        host: "%"
+        state: present
+        login_user: root
+        login_password: "{{ root_password }}"
+      no_log: true
+
+    - name: Donner les privilèges à oneadmin sur opennebula
+      ansible.builtin.mysql_user:
+        name: oneadmin
+        host: "%"
+        priv: "opennebula.*:ALL"
+        state: present
+        login_user: root
+        login_password: "{{ root_password }}"
+
+    - name: Définir le niveau d'isolation MySQL
+      ansible.builtin.shell: |
+        mysql -u root -p'{{ root_password }}' \
+        -e "SET GLOBAL TRANSACTION ISOLATION LEVEL READ COMMITTED;"
+      changed_when: false
+
+
