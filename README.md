@@ -67,8 +67,12 @@ astra_ansible_configuration/
 │
 ├── README.md
 │
-└── playbooks/
-    ├── site.yml
-    ├── frontend.yml
-    └── backend.yml
+├── ansible.cfg
+│
+├── front/
+│    └── install_front.yml
+│
+└── inventory/
+     └── inventory.yml
+
 ```
